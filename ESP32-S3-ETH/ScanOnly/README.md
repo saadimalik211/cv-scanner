@@ -1,9 +1,10 @@
-# GM812 Barcode Scanner - Minimal Implementation
+# GM812 Barcode Scanner - Multi-Core Ethernet Implementation
 
-This project provides a minimal, reliable implementation for interfacing with the GM812 barcode scanner module using an ESP32-S3 microcontroller.
+This project provides a robust implementation for interfacing with the GM812 barcode scanner module using an ESP32-S3 microcontroller with Ethernet connectivity.
 
 ## Hardware Setup
 
+### Scanner Connection
 Connect the GM812 Scanner to the ESP32-S3 as follows:
 
 1. **Scanner Pin 1 (VCC)** → **5V** power supply
@@ -13,44 +14,67 @@ Connect the GM812 Scanner to the ESP32-S3 as follows:
 
 > **Important:** The scanner requires 5V power, not 3.3V. The TX/RX pins are 3.3V compatible.
 
+### Ethernet Connection
+This project uses the Waveshare ESP32-S3-ETH module with W5500 Ethernet chip:
+
+- **MISO** → GPIO 12
+- **MOSI** → GPIO 11
+- **SCLK** → GPIO 13
+- **CS** → GPIO 14
+- **INT** → GPIO 10
+- **RST** → GPIO 9
+
 ## Project Structure
 
-- `ScanOnly.ino`: Main Arduino sketch file
-- `config.h`: Pin configuration and settings
+- `ScanOnly.ino`: Main Arduino sketch file with multi-core implementation
+- `config.h`: Pin configuration, network settings, and timing parameters
+- `serialdoc.md`: Comprehensive GM812 scanner documentation
 - `README.md`: This file
 
 ## How It Works
 
 This implementation:
 
-1. Initializes the scanner with minimal, essential commands:
-   - Factory reset to ensure clean state
-   - Enable all barcode types
-   - Enable UART output
-   - Save configuration to flash memory
+1. Uses FreeRTOS multi-core task management:
+   - **Core 0**: Dedicated to handling scanner data
+   - **Core 1**: Manages Ethernet/UDP network communications
 
-2. Listens for barcode data while filtering out protocol messages.
+2. Provides robust barcode processing:
+   - Captures data from the scanner UART
+   - Filters out protocol messages to extract valid barcode data
+   - Thread-safe data sharing between cores using mutexes
 
-3. Automatically reinitializes the scanner if no activity is detected for a minute (to handle potential scanner power-down issues).
+3. Network features:
+   - Configurable static IP or DHCP
+   - UDP broadcasting of scanned barcodes to network clients
+   - Automatic Ethernet reconnection on link failure
 
 ## Usage
 
-1. Upload the code to your ESP32-S3 board
-2. Open the Serial Monitor at 115200 baud
-3. Scanned barcodes will appear in the serial console
-4. The scanner is in passive mode - it will scan and beep when it sees a barcode without requiring triggers
+1. Configure network settings in `config.h` to match your network
+2. Upload the code to your ESP32-S3 board
+3. Open the Serial Monitor at 115200 baud
+4. Connect the Ethernet cable
+5. Scanned barcodes will appear in:
+   - Serial console
+   - Broadcast via UDP to port 4210
 
 ## Customization
 
-You can modify `config.h` to change pin assignments or the baud rate as needed for your hardware configuration.
+You can modify `config.h` to change:
+- Scanner pin assignments
+- Network settings (IP, gateway, subnet, DNS)
+- UDP broadcast port and destination
+- Timing parameters
 
 ## Troubleshooting
 
 - If the scanner LED illuminates but no data appears, try repositioning the barcode or adjusting lighting conditions.
-- If the scanner powers off, the code will automatically reinitialize it after the timeout period.
-- Verify that you're using 5V power for the scanner, as 3.3V is insufficient.
+- If Ethernet fails to connect, check your cable and network settings.
+- For detailed debugging, set DEBUG_MODE to true in the code.
 
 ## Notes
 
-- This implementation is based on the GM812 Serial Documentation and extensive testing.
-- The scanner outputs barcode data in plain ASCII format with a carriage return (0x0D) at the end. 
+- This implementation uses thread-safe communication between cores.
+- The scanner is in passive mode - it will scan when it sees a barcode without requiring triggers.
+- UDP broadcasts allow multiple network clients to receive scanned data simultaneously. 
