@@ -1,0 +1,20 @@
+version: '3'
+
+services:
+  virtual-node:
+    build: .
+    container_name: virtual-node
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+    networks:
+      - scanner-network
+
+networks:
+  scanner-network:
+    driver: bridge 

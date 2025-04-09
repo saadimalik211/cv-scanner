@@ -8,6 +8,7 @@
 #include <WiFiUdp.h>
 #include "config.h"
 #include <WiFi.h>
+#include <HTTPClient.h>
 
 // Network status variable
 bool networkConnected = false;
@@ -383,18 +384,14 @@ void networkTask(void *pvParameters) {
   // Initialize Ethernet
   initEthernet();
   
-  // Initialize UDP once Ethernet is connected
-  if (networkConnected && !udpInitialized) {
-    udpClient.begin(UDP_BROADCAST_PORT);
-    udpInitialized = true;
-    
-    if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
-      Serial.printf("UDP initialized on port %d\n", UDP_BROADCAST_PORT);
-      xSemaphoreGive(serialMutex);
-    }
+  // Send initial heartbeat when network is connected
+  if (networkConnected) {
+    sendHeartbeat();
   }
   
   // Network monitoring loop
+  unsigned long lastHeartbeatTime = 0;
+  
   while(true) {
     // Check Ethernet connectivity periodically
     static unsigned long lastConnectionCheck = 0;
@@ -408,40 +405,27 @@ void networkTask(void *pvParameters) {
         // Re-initialize Ethernet
         initEthernet();
         
-        // Re-initialize UDP if Ethernet is connected
-        if (networkConnected && !udpInitialized) {
-          udpClient.begin(UDP_BROADCAST_PORT);
-          udpInitialized = true;
-          
-          if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
-            Serial.printf("UDP reinitialized on port %d\n", UDP_BROADCAST_PORT);
-            xSemaphoreGive(serialMutex);
-          }
+        // Send heartbeat after reconnection
+        if (networkConnected) {
+          sendHeartbeat();
+          lastHeartbeatTime = millis();
         }
       }
       lastConnectionCheck = millis();
     }
     
+    // Send periodic heartbeat
+    if (networkConnected && (millis() - lastHeartbeatTime > HEARTBEAT_INTERVAL)) {
+      sendHeartbeat();
+      lastHeartbeatTime = millis();
+    }
+    
     // Check if there's new barcode data to send
-    if (networkConnected && udpInitialized) {
+    if (networkConnected) {
       if (xSemaphoreTake(barcodeData.mutex, portMAX_DELAY) == pdTRUE) {
         if (barcodeData.newData) {
-          // Prepare broadcast address
-          IPAddress broadcastIP(UDP_BROADCAST_IP);
-          
-          // Start UDP packet
-          udpClient.beginPacket(broadcastIP, UDP_BROADCAST_PORT);
-          
-          // Write barcode data to the packet
-          udpClient.write((uint8_t*)barcodeData.data, barcodeData.length);
-          
-          // End and send the packet
-          udpClient.endPacket();
-          
-          if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
-            Serial.printf("Sent barcode data via UDP broadcast: %s\n", barcodeData.data);
-            xSemaphoreGive(serialMutex);
-          }
+          // Send barcode data via API
+          sendBarcodeData(barcodeData.data);
           
           // Mark data as processed
           barcodeData.newData = false;
@@ -460,4 +444,79 @@ void loop() {
   // The main loop is not used as our code runs in dedicated tasks
   // If you want to add code here, be aware it runs on Core 1
   vTaskDelay(1000 / portTICK_PERIOD_MS);
+}
+
+// Function to send heartbeat
+bool sendHeartbeat() {
+  if (!networkConnected) return false;
+  
+  HTTPClient http;
+  String url = String(API_SERVER) + "/api/node/qrCodeReaderHeartbeat?nodeUUID=" + String(NODE_UUID) + "&qrReaderUUID=" + String(SCANNER_ID);
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  
+  int httpResponseCode = http.PUT("{}");  // Empty JSON body
+  
+  bool success = (httpResponseCode >= 200 && httpResponseCode < 300);
+  
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+    if (success) {
+      Serial.println("Heartbeat sent successfully");
+    } else {
+      Serial.printf("Heartbeat failed, code: %d\n", httpResponseCode);
+    }
+    xSemaphoreGive(serialMutex);
+  }
+  
+  http.end();
+  return success;
+}
+
+// Function to send barcode data
+bool sendBarcodeData(const char* barcodeData) {
+  if (!networkConnected) return false;
+  
+  HTTPClient http;
+  
+  // URL encode the barcode data
+  String encodedData = urlEncode(barcodeData);
+  
+  String url = String(API_SERVER) + "/api/node/recordQRCode?nodeUUID=" + String(NODE_UUID) 
+               + "&qrReaderUUID=" + String(SCANNER_ID) + "&data=" + encodedData;
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  
+  int httpResponseCode = http.PUT("{}");  // Empty JSON body
+  
+  bool success = (httpResponseCode >= 200 && httpResponseCode < 300);
+  
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+    if (success) {
+      Serial.println("Barcode data sent successfully");
+    } else {
+      Serial.printf("Barcode data submission failed, code: %d\n", httpResponseCode);
+    }
+    xSemaphoreGive(serialMutex);
+  }
+  
+  http.end();
+  return success;
+}
+
+// Helper function to URL encode a string
+String urlEncode(const char* str) {
+  String encodedString = "";
+  char c;
+  for (int i = 0; i < strlen(str); i++) {
+    c = str[i];
+    if (isAlphaNumeric(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedString += c;
+    } else {
+      encodedString += '%';
+      encodedString += String(c, HEX);
+    }
+  }
+  return encodedString;
 }

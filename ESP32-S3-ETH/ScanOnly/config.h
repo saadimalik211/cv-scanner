@@ -17,17 +17,22 @@
 #define STATIC_DNS1        8,8,8,8
 #define STATIC_DNS2        8,8,4,4
 
-// UDP Broadcast Configuration
-#define UDP_BROADCAST_PORT 4210
-#define UDP_BROADCAST_IP   255,255,255,255
+// API Configuration
+#define API_SERVER         "http://192.168.0.169"  // Replace with actual server address
+#define API_PORT           3000
+#define HEARTBEAT_INTERVAL 30000  // 30 seconds between heartbeats
+
+// Node and Scanner Identification
+#define NODE_UUID          "virtual-node"  // Default node UUID
+#define SCANNER_ID         99              // Default scanner ID
 
 // GM812 Scanner Configuration
-#define GM812_RX_PIN  21     // ESP32 RX pin connected to GM812 TX
-#define GM812_TX_PIN  17     // ESP32 TX pin connected to GM812 RX
-#define GM812_BAUD    9600   // Default baud rate for GM812 (9600 bps per documentation)
+#define GM812_RX_PIN       21     // ESP32 RX pin connected to GM812 TX
+#define GM812_TX_PIN       17     // ESP32 TX pin connected to GM812 RX
+#define GM812_BAUD         9600   // Default baud rate for GM812
 
 // Define the serial port for scanner directly
-#define SCANNER_SERIAL Serial2
+#define SCANNER_SERIAL     Serial2
 
 // Timing configuration
 #define BARCODE_TIMEOUT    100     // ms to wait after receiving barcode data

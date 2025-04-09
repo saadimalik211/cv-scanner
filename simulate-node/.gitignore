@@ -1,0 +1,15 @@
+# Node.js dependencies
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Data directory
+data/*
+!data/.gitkeep
+
+# Environment variables
+.env
+
+# OS specific files
+.DS_Store
+Thumbs.db 
