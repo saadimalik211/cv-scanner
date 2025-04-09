@@ -451,7 +451,21 @@ bool sendHeartbeat() {
   if (!networkConnected) return false;
   
   HTTPClient http;
-  String url = String(API_SERVER) + "/api/node/qrCodeReaderHeartbeat?nodeUUID=" + String(NODE_UUID) + "&qrReaderUUID=" + String(SCANNER_ID);
+  String url = String(API_SERVER);
+  
+  // Check if API_SERVER already includes http:// or https://
+  if (url.startsWith("http")) {
+    // Add port only if it's not the default ports (80 for HTTP, 443 for HTTPS)
+    if ((url.startsWith("http://") && API_PORT != 80) ||
+        (url.startsWith("https://") && API_PORT != 443)) {
+      url += ":" + String(API_PORT);
+    }
+  } else {
+    // If no protocol is specified, add it with the port
+    url = "http://" + url + ":" + String(API_PORT);
+  }
+  
+  url += "/api/node/qrCodeReaderHeartbeat?nodeUUID=" + String(NODE_UUID) + "&qrReaderUUID=" + String(SCANNER_ID);
   
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
@@ -465,6 +479,7 @@ bool sendHeartbeat() {
       Serial.println("Heartbeat sent successfully");
     } else {
       Serial.printf("Heartbeat failed, code: %d\n", httpResponseCode);
+      Serial.printf("URL: %s\n", url.c_str());
     }
     xSemaphoreGive(serialMutex);
   }
@@ -482,8 +497,22 @@ bool sendBarcodeData(const char* barcodeData) {
   // URL encode the barcode data
   String encodedData = urlEncode(barcodeData);
   
-  String url = String(API_SERVER) + "/api/node/recordQRCode?nodeUUID=" + String(NODE_UUID) 
-               + "&qrReaderUUID=" + String(SCANNER_ID) + "&data=" + encodedData;
+  String url = String(API_SERVER);
+  
+  // Check if API_SERVER already includes http:// or https://
+  if (url.startsWith("http")) {
+    // Add port only if it's not the default ports (80 for HTTP, 443 for HTTPS)
+    if ((url.startsWith("http://") && API_PORT != 80) ||
+        (url.startsWith("https://") && API_PORT != 443)) {
+      url += ":" + String(API_PORT);
+    }
+  } else {
+    // If no protocol is specified, add it with the port
+    url = "http://" + url + ":" + String(API_PORT);
+  }
+  
+  url += "/api/node/recordQRCode?nodeUUID=" + String(NODE_UUID) 
+         + "&qrReaderUUID=" + String(SCANNER_ID) + "&data=" + encodedData;
   
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
@@ -497,6 +526,7 @@ bool sendBarcodeData(const char* barcodeData) {
       Serial.println("Barcode data sent successfully");
     } else {
       Serial.printf("Barcode data submission failed, code: %d\n", httpResponseCode);
+      Serial.printf("URL: %s\n", url.c_str());
     }
     xSemaphoreGive(serialMutex);
   }

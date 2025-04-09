@@ -1,6 +1,6 @@
-# GM812 Barcode Scanner - Multi-Core Ethernet Implementation
+# GM812 Barcode Scanner - Multi-Core API Implementation
 
-This project provides a robust implementation for interfacing with the GM812 barcode scanner module using an ESP32-S3 microcontroller with Ethernet connectivity.
+This project provides a robust implementation for interfacing with the GM812 barcode scanner module using an ESP32-S3 microcontroller with Ethernet connectivity and API integration.
 
 ## Hardware Setup
 
@@ -37,7 +37,7 @@ This implementation:
 
 1. Uses FreeRTOS multi-core task management:
    - **Core 0**: Dedicated to handling scanner data
-   - **Core 1**: Manages Ethernet/UDP network communications
+   - **Core 1**: Manages Ethernet and API communications
 
 2. Provides robust barcode processing:
    - Captures data from the scanner UART
@@ -46,35 +46,57 @@ This implementation:
 
 3. Network features:
    - Configurable static IP or DHCP
-   - UDP broadcasting of scanned barcodes to network clients
+   - API integration for reporting scanner data
+   - Node and Scanner identification via configurable IDs
    - Automatic Ethernet reconnection on link failure
+
+## API Integration
+
+The scanner communicates with a server through two main API endpoints:
+
+1. **Heartbeat API** - Registers the scanner with the server:
+   - `PUT /api/node/qrCodeReaderHeartbeat?nodeUUID={nodeId}&qrReaderUUID={scannerId}`
+   - Sent at startup and periodically (every 30 seconds by default)
+
+2. **QR Code Data API** - Submits scanned QR code data:
+   - `PUT /api/node/recordQRCode?nodeUUID={nodeId}&qrReaderUUID={scannerId}&data={qrData}`
+   - Sent every time a barcode is successfully scanned
 
 ## Usage
 
-1. Configure network settings in `config.h` to match your network
+1. Configure network settings in `config.h` to match your network:
+   - Set `USE_STATIC_IP` to true or false as needed
+   - Configure `STATIC_IP`, `STATIC_GATEWAY`, etc. if using static IP
+   - Set `API_SERVER` to your server's address (including http:// prefix)
+   - Set `API_PORT` to the server port (default: 3000)
+   - Configure `NODE_UUID` and `SCANNER_ID` to identify this device
+
 2. Upload the code to your ESP32-S3 board
 3. Open the Serial Monitor at 115200 baud
 4. Connect the Ethernet cable
 5. Scanned barcodes will appear in:
    - Serial console
-   - Broadcast via UDP to port 4210
+   - API server logs
 
 ## Customization
 
 You can modify `config.h` to change:
 - Scanner pin assignments
 - Network settings (IP, gateway, subnet, DNS)
-- UDP broadcast port and destination
+- API server address and port
+- Node UUID and Scanner ID
+- Heartbeat interval
 - Timing parameters
 
 ## Troubleshooting
 
 - If the scanner LED illuminates but no data appears, try repositioning the barcode or adjusting lighting conditions.
 - If Ethernet fails to connect, check your cable and network settings.
+- If API calls fail, verify the server address and port are correct and the server is accessible.
 - For detailed debugging, set DEBUG_MODE to true in the code.
 
 ## Notes
 
 - This implementation uses thread-safe communication between cores.
 - The scanner is in passive mode - it will scan when it sees a barcode without requiring triggers.
-- UDP broadcasts allow multiple network clients to receive scanned data simultaneously. 
+- API integration allows for reporting scanned data to a server. 
