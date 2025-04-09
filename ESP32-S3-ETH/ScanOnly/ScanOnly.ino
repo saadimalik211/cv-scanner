@@ -1,28 +1,59 @@
 /*
  * GM812 Scanner - Multi-Core Implementation with Ethernet
- * Scanner and Ethernet running on separate cores
+ * --------------------------------------------------------
+ * This project implements a barcode scanner using the GM812 module
+ * with an ESP32-S3 microcontroller and W5500 Ethernet connectivity.
+ * It uses a dual-core approach where:
+ *  - Core 0: Handles scanner data acquisition and processing
+ *  - Core 1: Manages network communication and API integration
+ *
+ * Thread-safe communication between cores is implemented using FreeRTOS
+ * mutexes and a shared data structure.
  */
 
-#include <ETH.h>
-#include <SPI.h>
-#include <WiFiUdp.h>
-#include "config.h"
-#include <WiFi.h>
-#include <HTTPClient.h>
+//=====================================================================
+// 1. INCLUDES AND CONFIGURATION
+//=====================================================================
 
-// Network status variable
-bool networkConnected = false;
+#include <ETH.h>           // Ethernet library
+#include <SPI.h>           // SPI library for Ethernet
+#include <WiFiUdp.h>       // WiFi UDP library (legacy from previous version)
+#include <WiFi.h>          // WiFi library for event handling
+#include <HTTPClient.h>     // HTTP client for API requests
+#include "config.h"        // Project configuration
 
-// UDP client for broadcasting
-WiFiUDP udpClient;
-bool udpInitialized = false;
+//=====================================================================
+// 2. GLOBAL VARIABLES
+//=====================================================================
 
-// Shared data structure for barcode information
+// ----- Debug Configuration -----
+const bool DEBUG_MODE = false;  // Set to true for verbose debug output
+
+// ----- Task Handles -----
+TaskHandle_t scannerTaskHandle = NULL;  // Handle for scanner task (Core 0)
+TaskHandle_t networkTaskHandle = NULL;  // Handle for network task (Core 1)
+
+// ----- Synchronization Objects -----
+SemaphoreHandle_t serialMutex;   // Protects access to the Serial interface
+SemaphoreHandle_t bufferMutex;   // Protects access to the barcode buffer
+
+// ----- Network State -----
+bool networkConnected = false;   // Tracks Ethernet connection status
+WiFiUDP udpClient;               // Legacy UDP client (not used in current version)
+bool udpInitialized = false;     // Legacy UDP flag (not used in current version)
+
+// ----- Scanner Buffer -----
+char rawBuffer[512];             // Raw data buffer from scanner
+int bufferIndex = 0;             // Current position in raw buffer
+unsigned long lastDataTime = 0;  // Timestamp of last received data
+bool newDataAvailable = false;   // Flag indicating new data is in buffer
+
+// ----- Barcode Data Structure -----
 typedef struct {
-  char data[256];
-  int length;
-  bool newData;
-  SemaphoreHandle_t mutex;
+  char data[256];              // Processed barcode data
+  int length;                  // Length of barcode data
+  bool newData;                // Flag indicating new barcode is available
+  SemaphoreHandle_t mutex;     // Mutex protecting this structure
 } BarcodeData_t;
 
 BarcodeData_t barcodeData = {
@@ -31,28 +62,15 @@ BarcodeData_t barcodeData = {
   .newData = false
 };
 
-// Simple buffer for collecting raw data
-char rawBuffer[512]; 
-int bufferIndex = 0;
-unsigned long lastDataTime = 0;
-bool newDataAvailable = false;
+//=====================================================================
+// 3. UTILITY FUNCTIONS
+//=====================================================================
 
-// Task handles for the scanner and network tasks
-TaskHandle_t scannerTaskHandle = NULL;
-TaskHandle_t networkTaskHandle = NULL;
-
-// Mutexes for synchronization
-SemaphoreHandle_t serialMutex;
-SemaphoreHandle_t bufferMutex;
-
-// Task function prototypes
-void scannerTask(void *pvParameters);
-void networkTask(void *pvParameters);
-
-// Debug flag to enable/disable verbose output
-const bool DEBUG_MODE = false;
-
-// Safe serial print functions that use the mutex
+/**
+ * Safely prints a message to the serial port using mutex protection
+ * 
+ * @param message The message to print
+ */
 void safePrint(const char* message) {
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
     Serial.print(message);
@@ -60,6 +78,11 @@ void safePrint(const char* message) {
   }
 }
 
+/**
+ * Safely prints a message followed by a newline to the serial port
+ * 
+ * @param message The message to print
+ */
 void safePrintln(const char* message) {
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
     Serial.println(message);
@@ -67,6 +90,12 @@ void safePrintln(const char* message) {
   }
 }
 
+/**
+ * Safely prints a formatted message to the serial port
+ * 
+ * @param format Printf-style format string
+ * @param ... Variable arguments for the format string
+ */
 void safePrintf(const char* format, ...) {
   char buffer[256];
   va_list args;
@@ -80,7 +109,36 @@ void safePrintf(const char* format, ...) {
   }
 }
 
-// Ethernet event handler
+/**
+ * Encodes a string for URL transmission (percent encoding)
+ * 
+ * @param str The string to encode
+ * @return String The URL-encoded string
+ */
+String urlEncode(const char* str) {
+  String encodedString = "";
+  char c;
+  for (int i = 0; i < strlen(str); i++) {
+    c = str[i];
+    if (isAlphaNumeric(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedString += c;
+    } else {
+      encodedString += '%';
+      encodedString += String(c, HEX);
+    }
+  }
+  return encodedString;
+}
+
+//=====================================================================
+// 4. ETHERNET AND NETWORK FUNCTIONS
+//=====================================================================
+
+/**
+ * Handler for Ethernet events
+ * 
+ * @param event The event type that occurred
+ */
 void WiFiEvent(arduino_event_id_t event) {
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
     switch (event) {
@@ -114,67 +172,9 @@ void WiFiEvent(arduino_event_id_t event) {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  
-  // Create mutexes before any multitasking
-  serialMutex = xSemaphoreCreateMutex();
-  bufferMutex = xSemaphoreCreateMutex();
-  barcodeData.mutex = xSemaphoreCreateMutex();
-  
-  if (serialMutex == NULL || bufferMutex == NULL || barcodeData.mutex == NULL) {
-    Serial.println("Error creating mutexes");
-    while(1); // Fatal error
-  }
-  
-  Serial.println("\n\nGM812 Scanner - Multi-Core Implementation with Ethernet");
-  
-  // Initialize scanner UART
-  init_scanner();
-  
-  // Create scanner task on Core 0
-  xTaskCreatePinnedToCore(
-    scannerTask,          // Function to implement the task
-    "ScannerTask",        // Name of the task
-    4096,                 // Stack size in words
-    NULL,                 // Task input parameter
-    1,                    // Priority of the task (1 being low)
-    &scannerTaskHandle,   // Task handle
-    0                     // Core where the task should run (0 = Core 0)
-  );
-  
-  Serial.println("Scanner task started on Core 0");
-  
-  // Create network task on Core 1
-  xTaskCreatePinnedToCore(
-    networkTask,          // Function to implement the task
-    "NetworkTask",        // Name of the task
-    4096,                 // Stack size in words
-    NULL,                 // Task input parameter
-    1,                    // Priority of the task (1 being low)
-    &networkTaskHandle,   // Task handle
-    1                     // Core where the task should run (1 = Core 1)
-  );
-  
-  Serial.println("Network task started on Core 1");
-}
-
-void init_scanner() {
-  // Initialize the scanner UART
-  SCANNER_SERIAL.begin(GM812_BAUD, SERIAL_8N1, GM812_RX_PIN, GM812_TX_PIN);
-  Serial.printf("Scanner UART initialized on RX:%d, TX:%d at %d baud\n", 
-                GM812_RX_PIN, GM812_TX_PIN, GM812_BAUD);
-  
-  // Clear any pending data
-  while (SCANNER_SERIAL.available()) SCANNER_SERIAL.read();
-  
-  // Reset buffer
-  bufferIndex = 0;
-  
-  Serial.println("Ready to receive barcode data!");
-}
-
+/**
+ * Initializes the Ethernet interface
+ */
 void initEthernet() {
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
     Serial.println("Initializing Ethernet...");
@@ -242,7 +242,131 @@ void initEthernet() {
   }
 }
 
-void printBarcode() {
+/**
+ * Sends a heartbeat signal to the API server
+ * 
+ * @return bool True if heartbeat was successfully sent, false otherwise
+ */
+bool sendHeartbeat() {
+  if (!networkConnected) return false;
+  
+  HTTPClient http;
+  String url = String(API_SERVER);
+  
+  // Check if API_SERVER already includes http:// or https://
+  if (url.startsWith("http")) {
+    // Add port only if it's not the default ports (80 for HTTP, 443 for HTTPS)
+    if ((url.startsWith("http://") && API_PORT != 80) ||
+        (url.startsWith("https://") && API_PORT != 443)) {
+      url += ":" + String(API_PORT);
+    }
+  } else {
+    // If no protocol is specified, add it with the port
+    url = "http://" + url + ":" + String(API_PORT);
+  }
+  
+  url += "/api/node/qrCodeReaderHeartbeat?nodeUUID=" + String(NODE_UUID) + "&qrReaderUUID=" + String(SCANNER_ID);
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  
+  int httpResponseCode = http.PUT("{}");  // Empty JSON body
+  
+  bool success = (httpResponseCode >= 200 && httpResponseCode < 300);
+  
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+    if (success) {
+      Serial.println("Heartbeat sent successfully");
+    } else {
+      Serial.printf("Heartbeat failed, code: %d\n", httpResponseCode);
+      Serial.printf("URL: %s\n", url.c_str());
+    }
+    xSemaphoreGive(serialMutex);
+  }
+  
+  http.end();
+  return success;
+}
+
+/**
+ * Sends barcode data to the API server
+ * 
+ * @param barcodeData Pointer to a null-terminated string containing the barcode data
+ * @return bool True if data was successfully sent, false otherwise
+ */
+bool sendBarcodeData(const char* barcodeData) {
+  if (!networkConnected) return false;
+  
+  HTTPClient http;
+  
+  // URL encode the barcode data
+  String encodedData = urlEncode(barcodeData);
+  
+  String url = String(API_SERVER);
+  
+  // Check if API_SERVER already includes http:// or https://
+  if (url.startsWith("http")) {
+    // Add port only if it's not the default ports (80 for HTTP, 443 for HTTPS)
+    if ((url.startsWith("http://") && API_PORT != 80) ||
+        (url.startsWith("https://") && API_PORT != 443)) {
+      url += ":" + String(API_PORT);
+    }
+  } else {
+    // If no protocol is specified, add it with the port
+    url = "http://" + url + ":" + String(API_PORT);
+  }
+  
+  url += "/api/node/recordQRCode?nodeUUID=" + String(NODE_UUID) 
+         + "&qrReaderUUID=" + String(SCANNER_ID) + "&data=" + encodedData;
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  
+  int httpResponseCode = http.PUT("{}");  // Empty JSON body
+  
+  bool success = (httpResponseCode >= 200 && httpResponseCode < 300);
+  
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+    if (success) {
+      Serial.println("Barcode data sent successfully");
+    } else {
+      Serial.printf("Barcode data submission failed, code: %d\n", httpResponseCode);
+      Serial.printf("URL: %s\n", url.c_str());
+    }
+    xSemaphoreGive(serialMutex);
+  }
+  
+  http.end();
+  return success;
+}
+
+//=====================================================================
+// 5. SCANNER FUNCTIONS
+//=====================================================================
+
+/**
+ * Initializes the scanner UART interface
+ */
+void init_scanner() {
+  // Initialize the scanner UART
+  SCANNER_SERIAL.begin(GM812_BAUD, SERIAL_8N1, GM812_RX_PIN, GM812_TX_PIN);
+  Serial.printf("Scanner UART initialized on RX:%d, TX:%d at %d baud\n", 
+                GM812_RX_PIN, GM812_TX_PIN, GM812_BAUD);
+  
+  // Clear any pending data
+  while (SCANNER_SERIAL.available()) SCANNER_SERIAL.read();
+  
+  // Reset buffer
+  bufferIndex = 0;
+  
+  Serial.println("Ready to receive barcode data!");
+}
+
+/**
+ * Processes raw scanner data to extract barcode information
+ * Takes data from the rawBuffer and processes it into barcodeData
+ */
+void processBarcode() {
   // Take the buffer mutex to ensure exclusive access to the buffer
   if (xSemaphoreTake(bufferMutex, portMAX_DELAY) != pdTRUE) {
     return;
@@ -336,7 +460,16 @@ void printBarcode() {
   }
 }
 
-// Scanner task function running on Core 0
+//=====================================================================
+// 6. TASK MANAGEMENT
+//=====================================================================
+
+/**
+ * Scanner task - runs on Core 0
+ * Responsible for reading data from the scanner and processing barcodes
+ * 
+ * @param pvParameters Task parameters (not used)
+ */
 void scannerTask(void *pvParameters) {
   // Print which core this task is running on
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
@@ -364,7 +497,7 @@ void scannerTask(void *pvParameters) {
     
     // If we have new data and there's been a pause in reception, process it
     if (newDataAvailable && millis() - lastDataTime > BARCODE_TIMEOUT) {
-      printBarcode();
+      processBarcode();
     }
     
     // Small delay to prevent watchdog issues and allow other tasks to run
@@ -372,7 +505,12 @@ void scannerTask(void *pvParameters) {
   }
 }
 
-// Network task function running on Core 1
+/**
+ * Network task - runs on Core 1
+ * Responsible for maintaining Ethernet connection and sending data to the server
+ * 
+ * @param pvParameters Task parameters (not used)
+ */
 void networkTask(void *pvParameters) {
   // Print which core this task is running on
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
@@ -439,114 +577,66 @@ void networkTask(void *pvParameters) {
   }
 }
 
-// Main loop is empty since we're using FreeRTOS tasks
+//=====================================================================
+// 7. SETUP AND LOOP
+//=====================================================================
+
+/**
+ * Arduino setup function - called once at startup
+ * Initializes hardware, creates tasks, and starts the scheduler
+ */
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  // Create mutexes before any multitasking
+  serialMutex = xSemaphoreCreateMutex();
+  bufferMutex = xSemaphoreCreateMutex();
+  barcodeData.mutex = xSemaphoreCreateMutex();
+  
+  if (serialMutex == NULL || bufferMutex == NULL || barcodeData.mutex == NULL) {
+    Serial.println("Error creating mutexes");
+    while(1); // Fatal error
+  }
+  
+  Serial.println("\n\nGM812 Scanner - Multi-Core Implementation with Ethernet");
+  
+  // Initialize scanner UART
+  init_scanner();
+  
+  // Create scanner task on Core 0
+  xTaskCreatePinnedToCore(
+    scannerTask,          // Function to implement the task
+    "ScannerTask",        // Name of the task
+    4096,                 // Stack size in words
+    NULL,                 // Task input parameter
+    1,                    // Priority of the task (1 being low)
+    &scannerTaskHandle,   // Task handle
+    0                     // Core where the task should run (0 = Core 0)
+  );
+  
+  Serial.println("Scanner task started on Core 0");
+  
+  // Create network task on Core 1
+  xTaskCreatePinnedToCore(
+    networkTask,          // Function to implement the task
+    "NetworkTask",        // Name of the task
+    4096,                 // Stack size in words
+    NULL,                 // Task input parameter
+    1,                    // Priority of the task (1 being low)
+    &networkTaskHandle,   // Task handle
+    1                     // Core where the task should run (1 = Core 1)
+  );
+  
+  Serial.println("Network task started on Core 1");
+}
+
+/**
+ * Arduino loop function - called repeatedly
+ * Not used in this implementation as we're using FreeRTOS tasks
+ */
 void loop() {
   // The main loop is not used as our code runs in dedicated tasks
   // If you want to add code here, be aware it runs on Core 1
   vTaskDelay(1000 / portTICK_PERIOD_MS);
-}
-
-// Function to send heartbeat
-bool sendHeartbeat() {
-  if (!networkConnected) return false;
-  
-  HTTPClient http;
-  String url = String(API_SERVER);
-  
-  // Check if API_SERVER already includes http:// or https://
-  if (url.startsWith("http")) {
-    // Add port only if it's not the default ports (80 for HTTP, 443 for HTTPS)
-    if ((url.startsWith("http://") && API_PORT != 80) ||
-        (url.startsWith("https://") && API_PORT != 443)) {
-      url += ":" + String(API_PORT);
-    }
-  } else {
-    // If no protocol is specified, add it with the port
-    url = "http://" + url + ":" + String(API_PORT);
-  }
-  
-  url += "/api/node/qrCodeReaderHeartbeat?nodeUUID=" + String(NODE_UUID) + "&qrReaderUUID=" + String(SCANNER_ID);
-  
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  
-  int httpResponseCode = http.PUT("{}");  // Empty JSON body
-  
-  bool success = (httpResponseCode >= 200 && httpResponseCode < 300);
-  
-  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
-    if (success) {
-      Serial.println("Heartbeat sent successfully");
-    } else {
-      Serial.printf("Heartbeat failed, code: %d\n", httpResponseCode);
-      Serial.printf("URL: %s\n", url.c_str());
-    }
-    xSemaphoreGive(serialMutex);
-  }
-  
-  http.end();
-  return success;
-}
-
-// Function to send barcode data
-bool sendBarcodeData(const char* barcodeData) {
-  if (!networkConnected) return false;
-  
-  HTTPClient http;
-  
-  // URL encode the barcode data
-  String encodedData = urlEncode(barcodeData);
-  
-  String url = String(API_SERVER);
-  
-  // Check if API_SERVER already includes http:// or https://
-  if (url.startsWith("http")) {
-    // Add port only if it's not the default ports (80 for HTTP, 443 for HTTPS)
-    if ((url.startsWith("http://") && API_PORT != 80) ||
-        (url.startsWith("https://") && API_PORT != 443)) {
-      url += ":" + String(API_PORT);
-    }
-  } else {
-    // If no protocol is specified, add it with the port
-    url = "http://" + url + ":" + String(API_PORT);
-  }
-  
-  url += "/api/node/recordQRCode?nodeUUID=" + String(NODE_UUID) 
-         + "&qrReaderUUID=" + String(SCANNER_ID) + "&data=" + encodedData;
-  
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  
-  int httpResponseCode = http.PUT("{}");  // Empty JSON body
-  
-  bool success = (httpResponseCode >= 200 && httpResponseCode < 300);
-  
-  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
-    if (success) {
-      Serial.println("Barcode data sent successfully");
-    } else {
-      Serial.printf("Barcode data submission failed, code: %d\n", httpResponseCode);
-      Serial.printf("URL: %s\n", url.c_str());
-    }
-    xSemaphoreGive(serialMutex);
-  }
-  
-  http.end();
-  return success;
-}
-
-// Helper function to URL encode a string
-String urlEncode(const char* str) {
-  String encodedString = "";
-  char c;
-  for (int i = 0; i < strlen(str); i++) {
-    c = str[i];
-    if (isAlphaNumeric(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encodedString += c;
-    } else {
-      encodedString += '%';
-      encodedString += String(c, HEX);
-    }
-  }
-  return encodedString;
 }
