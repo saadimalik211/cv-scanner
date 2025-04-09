@@ -11,7 +11,6 @@ This system enables barcode scanning with real-time data transmission to a centr
 
 ## 🔄 System Architecture
 
-![System Architecture](https://i.imgur.com/JfMZU0M.png)
 
 1. **GM812 Scanner** connects to the **ESP32-S3-ETH** microcontroller
 2. ESP32 processes barcode data and sends it to the **Virtual Node Server** via API calls
