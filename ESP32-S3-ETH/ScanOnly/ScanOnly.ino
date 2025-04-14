@@ -21,6 +21,7 @@
 #include <WiFi.h>          // WiFi library for event handling
 #include <HTTPClient.h>     // HTTP client for API requests
 #include "config.h"        // Project configuration
+#include <esp_task_wdt.h>  // ESP32 task watchdog timer
 
 //=====================================================================
 // 2. GLOBAL VARIABLES
@@ -41,6 +42,13 @@ SemaphoreHandle_t bufferMutex;   // Protects access to the barcode buffer
 bool networkConnected = false;   // Tracks Ethernet connection status
 WiFiUDP udpClient;               // Legacy UDP client (not used in current version)
 bool udpInitialized = false;     // Legacy UDP flag (not used in current version)
+
+// ----- Watchdog Configuration -----
+unsigned long lastSuccessfulHeartbeat = 0;  // Track last successful heartbeat
+unsigned long consecutiveFailedHeartbeats = 0; // Track consecutive heartbeat failures
+unsigned long lastNetworkActivity = 0;     // Track any successful network activity
+const unsigned long NETWORK_WATCHDOG_TIMEOUT = 15 * 60 * 1000; // 15 minutes watchdog
+const unsigned long MAX_FAILED_HEARTBEATS = 5;  // Number of failures before reconnect
 
 // ----- Scanner Buffer -----
 char rawBuffer[512];             // Raw data buffer from scanner
@@ -173,6 +181,27 @@ void WiFiEvent(arduino_event_id_t event) {
 }
 
 /**
+ * Performs a hard reset of the Ethernet hardware
+ * Used when Ethernet appears stuck but still "connected"
+ */
+void resetEthernet() {
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+    Serial.println("RESETTING ETHERNET HARDWARE");
+    xSemaphoreGive(serialMutex);
+  }
+  
+  // Hard reset W5500 chip
+  pinMode(ETH_RST_PIN, OUTPUT);
+  digitalWrite(ETH_RST_PIN, LOW);
+  delay(100);
+  digitalWrite(ETH_RST_PIN, HIGH);
+  
+  // Re-initialize Ethernet
+  networkConnected = false;
+  initEthernet();
+}
+
+/**
  * Initializes the Ethernet interface
  */
 void initEthernet() {
@@ -269,6 +298,7 @@ bool sendHeartbeat() {
   
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
+  http.setTimeout(10000); // 10 second timeout for heartbeat requests
   
   int httpResponseCode = http.PUT("{}");  // Empty JSON body
   
@@ -277,9 +307,14 @@ bool sendHeartbeat() {
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
     if (success) {
       Serial.println("Heartbeat sent successfully");
+      consecutiveFailedHeartbeats = 0;
+      lastSuccessfulHeartbeat = millis();
+      lastNetworkActivity = millis();
     } else {
       Serial.printf("Heartbeat failed, code: %d\n", httpResponseCode);
       Serial.printf("URL: %s\n", url.c_str());
+      consecutiveFailedHeartbeats++;
+      Serial.printf("Consecutive failed heartbeats: %lu\n", consecutiveFailedHeartbeats);
     }
     xSemaphoreGive(serialMutex);
   }
@@ -321,6 +356,7 @@ bool sendBarcodeData(const char* barcodeData) {
   
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
+  http.setTimeout(10000); // 10 second timeout
   
   int httpResponseCode = http.PUT("{}");  // Empty JSON body
   
@@ -329,6 +365,7 @@ bool sendBarcodeData(const char* barcodeData) {
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
     if (success) {
       Serial.println("Barcode data sent successfully");
+      lastNetworkActivity = millis();
     } else {
       Serial.printf("Barcode data submission failed, code: %d\n", httpResponseCode);
       Serial.printf("URL: %s\n", url.c_str());
@@ -465,7 +502,7 @@ void processBarcode() {
 //=====================================================================
 
 /**
- * Scanner task - runs on Core 0
+ * Scanner task - runs on Core 1
  * Responsible for reading data from the scanner and processing barcodes
  * 
  * @param pvParameters Task parameters (not used)
@@ -506,7 +543,7 @@ void scannerTask(void *pvParameters) {
 }
 
 /**
- * Network task - runs on Core 1
+ * Network task - runs on Core 0
  * Responsible for maintaining Ethernet connection and sending data to the server
  * 
  * @param pvParameters Task parameters (not used)
@@ -519,21 +556,66 @@ void networkTask(void *pvParameters) {
     xSemaphoreGive(serialMutex);
   }
   
+  // Subscribe this task to the watchdog
+  esp_task_wdt_add(NULL);
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+    Serial.println("Network task subscribed to watchdog");
+    xSemaphoreGive(serialMutex);
+  }
+  
   // Initialize Ethernet
   initEthernet();
   
   // Send initial heartbeat when network is connected
   if (networkConnected) {
-    sendHeartbeat();
+    if (sendHeartbeat()) {
+      lastSuccessfulHeartbeat = millis();
+      lastNetworkActivity = millis();
+    }
   }
   
   // Network monitoring loop
   unsigned long lastHeartbeatTime = 0;
+  unsigned long lastNetworkStatusCheck = 0;
   
   while(true) {
-    // Check Ethernet connectivity periodically
-    static unsigned long lastConnectionCheck = 0;
-    if (millis() - lastConnectionCheck > 30000) { // Check every 30 seconds
+    // Reset watchdog timer to prevent system reset
+    esp_task_wdt_reset();
+    
+    unsigned long currentTime = millis();
+    
+    // Advanced network status check every 15 seconds
+    if (currentTime - lastNetworkStatusCheck > 15000) {
+      if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+        Serial.printf("Network status: %s, Last activity: %lus ago\n", 
+                     networkConnected ? "Connected" : "Disconnected",
+                     (currentTime - lastNetworkActivity) / 1000);
+        xSemaphoreGive(serialMutex);
+      }
+      
+      // Network watchdog - if no successful activity for NETWORK_WATCHDOG_TIMEOUT, force reset
+      if (currentTime - lastNetworkActivity > NETWORK_WATCHDOG_TIMEOUT && lastNetworkActivity > 0) {
+        if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+          Serial.println("NETWORK WATCHDOG TRIGGERED: No network activity for >15 minutes");
+          Serial.println("Performing hardware reset of Ethernet controller");
+          xSemaphoreGive(serialMutex);
+        }
+        resetEthernet();
+        lastNetworkActivity = currentTime; // Reset timer to prevent immediate retry
+      }
+      
+      // Check for too many consecutive heartbeat failures
+      if (consecutiveFailedHeartbeats >= MAX_FAILED_HEARTBEATS) {
+        if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+          Serial.printf("Too many failed heartbeats (%lu), resetting Ethernet\n", 
+                       consecutiveFailedHeartbeats);
+          xSemaphoreGive(serialMutex);
+        }
+        resetEthernet();
+        consecutiveFailedHeartbeats = 0; // Reset counter
+      }
+      
+      // Check Ethernet connection (ETH.linkStatus() might help on some boards)
       if (!networkConnected) {
         // Try to reconnect if connection was lost
         if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
@@ -545,17 +627,21 @@ void networkTask(void *pvParameters) {
         
         // Send heartbeat after reconnection
         if (networkConnected) {
-          sendHeartbeat();
-          lastHeartbeatTime = millis();
+          if (sendHeartbeat()) {
+            lastHeartbeatTime = currentTime;
+            lastSuccessfulHeartbeat = currentTime;
+            lastNetworkActivity = currentTime;
+          }
         }
       }
-      lastConnectionCheck = millis();
+      
+      lastNetworkStatusCheck = currentTime;
     }
     
     // Send periodic heartbeat
-    if (networkConnected && (millis() - lastHeartbeatTime > HEARTBEAT_INTERVAL)) {
+    if (networkConnected && (currentTime - lastHeartbeatTime > HEARTBEAT_INTERVAL)) {
       sendHeartbeat();
-      lastHeartbeatTime = millis();
+      lastHeartbeatTime = currentTime;
     }
     
     // Check if there's new barcode data to send
@@ -588,6 +674,14 @@ void networkTask(void *pvParameters) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  
+  // Enable ESP32 hardware watchdog
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 60000,                // 60 second timeout
+    .idle_core_mask = (1 << 1),         // Core 1 is idle and not monitored
+    .trigger_panic = true               // Trigger a panic/reboot on timeout
+  };
+  esp_task_wdt_init(&wdt_config);
   
   // Create mutexes before any multitasking
   serialMutex = xSemaphoreCreateMutex();
@@ -629,6 +723,9 @@ void setup() {
   );
   
   Serial.println("Network task started on Core 1");
+  
+  // Subscribe network task to watchdog
+  Serial.println("Network watchdog enabled with 60s timeout");
 }
 
 /**
