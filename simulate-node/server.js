@@ -55,7 +55,10 @@ app.put('/api/node/qrCodeReaderHeartbeat', (req, res) => {
   });
   
   // Store/update reader information
-  readers[`${nodeUUID}-${qrReaderUUID}`] = {
+  const readerKey = `${nodeUUID}-${qrReaderUUID}`;
+  console.log(`Storing reader with key: ${readerKey}`);
+  
+  readers[readerKey] = {
     lastHeartbeat: timestamp,
     errorMessages: errorMessages || null
   };
@@ -120,7 +123,10 @@ app.put('/api/node/recordQRCode', (req, res) => {
 // Simple status page
 app.get('/', (req, res) => {
   const readerInfo = Object.entries(readers).map(([id, info]) => {
-    const [nodeUUID, qrReaderUUID] = id.split('-');
+    const lastHyphenIndex = id.lastIndexOf('-');
+    const nodeUUID = id.substring(0, lastHyphenIndex);
+    const qrReaderUUID = id.substring(lastHyphenIndex + 1);
+    
     return {
       nodeUUID,
       qrReaderUUID,
@@ -139,6 +145,12 @@ app.get('/', (req, res) => {
         .api-call { margin-bottom: 20px; }
         .no-call { color: #666; font-style: italic; }
         h2 { margin-top: 30px; border-bottom: 1px solid #ddd; padding-bottom: 10px; }
+        table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+        th { background-color: #f2f2f2; text-align: left; }
+        td, th { padding: 8px; border: 1px solid #ddd; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        tr:hover { background-color: #f2f2f2; }
+        small { color: #666; }
       </style>
       <meta http-equiv="refresh" content="10">
     </head>
@@ -157,7 +169,28 @@ app.get('/', (req, res) => {
       </div>
       
       <h2>Registered QR Code Readers</h2>
-      <pre>${JSON.stringify(readerInfo, null, 2)}</pre>
+      <div class="readers">
+        ${readerInfo.length > 0 
+          ? `<table border="1" cellpadding="5" cellspacing="0">
+              <tr>
+                <th>Node UUID</th>
+                <th>QR Reader UUID</th>
+                <th>Last Heartbeat</th>
+                <th>Error Messages</th>
+              </tr>
+              ${readerInfo.map(reader => `
+                <tr>
+                  <td>${reader.nodeUUID}</td>
+                  <td>${reader.qrReaderUUID}</td>
+                  <td>${new Date(reader.lastHeartbeat).toLocaleString()}</td>
+                  <td>${reader.errorMessages || 'None'}</td>
+                </tr>
+              `).join('')}
+            </table>
+            <p><small>Debug info: Raw stored keys: ${Object.keys(readers).join(', ')}</small></p>`
+          : '<p>No readers registered yet</p>'
+        }
+      </div>
       
       <h2>API Endpoints</h2>
       <ul>
