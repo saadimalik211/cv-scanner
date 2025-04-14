@@ -11,7 +11,6 @@ This system enables barcode scanning with real-time data transmission to a centr
 
 ## 🔄 System Architecture
 
-
 1. **GM812 Scanner** connects to the **ESP32-S3-ETH** microcontroller
 2. ESP32 processes barcode data and sends it to the **Virtual Node Server** via API calls
 3. The server logs the data and displays it in a web interface
@@ -63,12 +62,18 @@ cv-scanner/
 
 ### ESP32 Features
 
-- Multi-core task management (scanner on Core 0, network on Core 1)
+- Multi-core task management:
+  - **Core 1**: Dedicated to handling scanner data
+  - **Core 0**: Manages network communication and API integration
 - Thread-safe data sharing between cores
 - Robust barcode processing and filtering
 - Configurable static IP or DHCP
 - API integration with heartbeat and data submission
-- Automatic reconnection on network failure
+- Advanced network resilience and error recovery:
+  - Hardware and software watchdog timers
+  - Automatic hardware reset on network failures
+  - Consecutive heartbeat failure detection
+  - Network activity monitoring
 
 ### ESP32 Configuration
 
@@ -173,6 +178,7 @@ All data is stored in the `simulate-node/data` directory:
 - If no data appears when scanning, check the UART pins and baud rate
 - If network connection fails, verify Ethernet cable and network settings
 - For detailed debugging, set `DEBUG_MODE` to `true` in the ESP32 code
+- If the device drops off the network after several days, the latest firmware includes watchdog and recovery mechanisms to automatically recover from these issues
 
 ### Server Issues
 
@@ -188,8 +194,12 @@ All data is stored in the `simulate-node/data` directory:
 
 - The ESP32 scanner is in passive mode - it scans when it sees a barcode
 - Thread-safe communication ensures no data loss between cores
+- System includes several network resilience features:
+  - 60-second hardware watchdog to detect and reset frozen tasks
+  - 15-minute network activity watchdog
+  - Automatic Ethernet controller hardware reset on connection issues
+  - Consecutive heartbeat failure tracking (resets after 5 failures)
 - The server uses JSON for all API responses and logging
-- The system is designed for robust operation in production environments
 
 ## 🔗 Further Resources
 

@@ -8,6 +8,7 @@ This service simulates a node that receives QR code scanner data via API calls. 
 - Receives and logs QR code data
 - Provides a simple web interface to view registered scanners
 - Logs all events to files for later analysis
+- Compatible with the enhanced ESP32 firmware with network resilience features
 
 ## API Endpoints
 
@@ -53,11 +54,19 @@ curl -X PUT "http://localhost:3000/api/node/recordQRCode?nodeUUID=virtual-node&q
 ## Data Storage
 
 All data is stored in the `data` directory:
-- `heartbeats.log` - Records all heartbeat events
+- `heartbeats.log` - Records all heartbeat events (including network reconnections)
 - `qrcodes.log` - Records all scanned QR codes
 
 ## Configuration
 
 You can configure the service using environment variables in the `docker-compose.yml` file:
 - `PORT` - The port the service listens on (default: 3000)
-- `NODE_ENV` - The Node.js environment (production, development) 
+- `NODE_ENV` - The Node.js environment (production, development)
+
+## Analyzing Data
+
+The included `find_missing_qr_seconds.py` script can be used to identify gaps in the heartbeat or scan data, which can help diagnose connectivity issues:
+
+```bash
+python find_missing_qr_seconds.py
+``` 

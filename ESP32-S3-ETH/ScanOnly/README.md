@@ -36,8 +36,8 @@ This project uses the Waveshare ESP32-S3-ETH module with W5500 Ethernet chip:
 This implementation:
 
 1. Uses FreeRTOS multi-core task management:
-   - **Core 0**: Dedicated to handling scanner data
-   - **Core 1**: Manages Ethernet and API communications
+   - **Core 1**: Dedicated to handling scanner data acquisition
+   - **Core 0**: Manages network communication and API integration
 
 2. Provides robust barcode processing:
    - Captures data from the scanner UART
@@ -48,7 +48,11 @@ This implementation:
    - Configurable static IP or DHCP
    - API integration for reporting scanner data
    - Node and Scanner identification via configurable IDs
-   - Automatic Ethernet reconnection on link failure
+   - Advanced network resilience with multi-stage recovery:
+     - Hardware watchdog (60 seconds timeout)
+     - Network activity monitoring (15 minute timeout)
+     - Hardware reset of W5500 Ethernet chip on failure
+     - Failure counting for heartbeat failures (5 consecutive failures triggers reset)
 
 ## API Integration
 
@@ -87,6 +91,7 @@ You can modify `config.h` to change:
 - Node UUID and Scanner ID
 - Heartbeat interval
 - Timing parameters
+- Watchdog timeouts and recovery behavior
 
 ## Troubleshooting
 
@@ -94,9 +99,12 @@ You can modify `config.h` to change:
 - If Ethernet fails to connect, check your cable and network settings.
 - If API calls fail, verify the server address and port are correct and the server is accessible.
 - For detailed debugging, set DEBUG_MODE to true in the code.
+- If the device drops off the network after several days of continuous operation, the latest firmware includes robust network recovery mechanisms that should automatically reset the system.
 
 ## Notes
 
 - This implementation uses thread-safe communication between cores.
 - The scanner is in passive mode - it will scan when it sees a barcode without requiring triggers.
-- API integration allows for reporting scanned data to a server. 
+- API integration allows for reporting scanned data to a server.
+- The system includes an ESP32 hardware watchdog that will reset the device if software hangs.
+- Periodic network status logs are displayed every 15 seconds. 
