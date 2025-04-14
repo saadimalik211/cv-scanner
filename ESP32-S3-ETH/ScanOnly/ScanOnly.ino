@@ -37,7 +37,6 @@ TaskHandle_t networkTaskHandle = NULL;  // Handle for network task (Core 1)
 // ----- Synchronization Objects -----
 SemaphoreHandle_t serialMutex;   // Protects access to the Serial interface
 SemaphoreHandle_t bufferMutex;   // Protects access to the barcode buffer
-SemaphoreHandle_t errorMutex;    // Protects access to error messages
 
 // ----- Network State -----
 bool networkConnected = false;   // Tracks Ethernet connection status
@@ -50,10 +49,6 @@ unsigned long consecutiveFailedHeartbeats = 0; // Track consecutive heartbeat fa
 unsigned long lastNetworkActivity = 0;     // Track any successful network activity
 const unsigned long NETWORK_WATCHDOG_TIMEOUT = 15 * 60 * 1000; // 15 minutes watchdog
 const unsigned long MAX_FAILED_HEARTBEATS = 5;  // Number of failures before reconnect
-
-// ----- Error Reporting -----
-String pendingErrorMessages = "";      // Buffer for storing error messages to report
-const unsigned int MAX_ERROR_LENGTH = 200;  // Maximum length for error message string
 
 // ----- Scanner Buffer -----
 char rawBuffer[512];             // Raw data buffer from scanner
@@ -143,46 +138,6 @@ String urlEncode(const char* str) {
   return encodedString;
 }
 
-/**
- * Records an error message to be sent with the next heartbeat
- * Thread-safe function that appends to the pendingErrorMessages buffer
- * 
- * @param errorMessage The error message to record
- */
-void recordError(const char* errorMessage) {
-  // Calculate uptime in seconds for timestamp
-  unsigned long uptimeSeconds = millis() / 1000;
-  
-  // Format with timestamp: [uptime] message
-  char formattedError[MAX_ERROR_LENGTH];
-  snprintf(formattedError, MAX_ERROR_LENGTH, "[%lu] %s", uptimeSeconds, errorMessage);
-  
-  // Take the mutex to safely update the error message string
-  if (xSemaphoreTake(errorMutex, portMAX_DELAY) == pdTRUE) {
-    // Add separator if there are already messages
-    if (pendingErrorMessages.length() > 0) {
-      pendingErrorMessages += "; ";
-    }
-    
-    // Add the new error message
-    pendingErrorMessages += formattedError;
-    
-    // Truncate if too long (URL length limits)
-    if (pendingErrorMessages.length() > MAX_ERROR_LENGTH) {
-      pendingErrorMessages = pendingErrorMessages.substring(0, MAX_ERROR_LENGTH - 3) + "...";
-    }
-    
-    xSemaphoreGive(errorMutex);
-  }
-  
-  // Also log to serial console
-  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
-    Serial.print("ERROR: ");
-    Serial.println(errorMessage);
-    xSemaphoreGive(serialMutex);
-  }
-}
-
 //=====================================================================
 // 4. ETHERNET AND NETWORK FUNCTIONS
 //=====================================================================
@@ -209,23 +164,14 @@ void WiFiEvent(arduino_event_id_t event) {
         Serial.println(ETH.localIP());
         Serial.print("MAC Address: ");
         Serial.println(ETH.macAddress());
-        
-        // Record successful connection
-        {
-          char connMsg[100];
-          snprintf(connMsg, sizeof(connMsg), "Ethernet connected with IP: %s", ETH.localIP().toString().c_str());
-          recordError(connMsg);
-        }
         break;
       case ARDUINO_EVENT_ETH_DISCONNECTED:
         Serial.println("ETH Disconnected");
         networkConnected = false;
-        recordError("Ethernet disconnected");
         break;
       case ARDUINO_EVENT_ETH_STOP:
         Serial.println("ETH Stopped");
         networkConnected = false;
-        recordError("Ethernet stopped");
         break;
       default:
         break;
@@ -243,9 +189,6 @@ void resetEthernet() {
     Serial.println("RESETTING ETHERNET HARDWARE");
     xSemaphoreGive(serialMutex);
   }
-  
-  // Record this event
-  recordError("Ethernet hardware reset performed");
   
   // Hard reset W5500 chip
   pinMode(ETH_RST_PIN, OUTPUT);
@@ -277,7 +220,6 @@ void initEthernet() {
       Serial.println("ETH start Failed!");
       xSemaphoreGive(serialMutex);
     }
-    recordError("Ethernet hardware initialization failed");
     return;
   }
   
@@ -324,7 +266,6 @@ void initEthernet() {
     } else {
       Serial.println("Failed to connect to Ethernet within timeout");
       Serial.println("Continuing without network functionality");
-      recordError("Ethernet connection timeout - failed to connect within specified time");
     }
     xSemaphoreGive(serialMutex);
   }
@@ -355,18 +296,6 @@ bool sendHeartbeat() {
   
   url += "/api/node/qrCodeReaderHeartbeat?nodeUUID=" + String(NODE_UUID) + "&qrReaderUUID=" + String(SCANNER_ID);
   
-  // Add error messages if any are pending
-  String errorMessages = "";
-  if (xSemaphoreTake(errorMutex, portMAX_DELAY) == pdTRUE) {
-    if (pendingErrorMessages.length() > 0) {
-      errorMessages = pendingErrorMessages;
-      url += "&errorMessages=" + urlEncode(errorMessages.c_str());
-      // Clear pending messages after sending
-      pendingErrorMessages = "";
-    }
-    xSemaphoreGive(errorMutex);
-  }
-  
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(10000); // 10 second timeout for heartbeat requests
@@ -378,9 +307,6 @@ bool sendHeartbeat() {
   if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
     if (success) {
       Serial.println("Heartbeat sent successfully");
-      if (errorMessages.length() > 0) {
-        Serial.println("Error messages sent with heartbeat");
-      }
       consecutiveFailedHeartbeats = 0;
       lastSuccessfulHeartbeat = millis();
       lastNetworkActivity = millis();
@@ -389,11 +315,6 @@ bool sendHeartbeat() {
       Serial.printf("URL: %s\n", url.c_str());
       consecutiveFailedHeartbeats++;
       Serial.printf("Consecutive failed heartbeats: %lu\n", consecutiveFailedHeartbeats);
-      
-      // Record the error for next successful heartbeat
-      char errorMsg[100];
-      snprintf(errorMsg, sizeof(errorMsg), "Heartbeat failed with HTTP code %d", httpResponseCode);
-      recordError(errorMsg);
     }
     xSemaphoreGive(serialMutex);
   }
@@ -448,11 +369,6 @@ bool sendBarcodeData(const char* barcodeData) {
     } else {
       Serial.printf("Barcode data submission failed, code: %d\n", httpResponseCode);
       Serial.printf("URL: %s\n", url.c_str());
-      
-      // Record the error for next heartbeat
-      char errorMsg[100];
-      snprintf(errorMsg, sizeof(errorMsg), "QR code submission failed with HTTP code %d", httpResponseCode);
-      recordError(errorMsg);
     }
     xSemaphoreGive(serialMutex);
   }
@@ -599,11 +515,6 @@ void scannerTask(void *pvParameters) {
     xSemaphoreGive(serialMutex);
   }
   
-  // Variables for tracking scanner activity
-  unsigned long lastScannerActivity = millis();
-  bool scannerInactivityReported = false;
-  const unsigned long SCANNER_INACTIVITY_THRESHOLD = 5 * 60 * 1000; // 5 minutes
-  
   // Task loop for scanner operations
   while(true) {
     // Read data from scanner when available
@@ -619,24 +530,11 @@ void scannerTask(void *pvParameters) {
         // Release the buffer mutex
         xSemaphoreGive(bufferMutex);
       }
-      
-      // Update scanner activity timestamp and reset inactivity flag
-      lastScannerActivity = millis();
-      if (scannerInactivityReported) {
-        recordError("Scanner activity resumed after period of inactivity");
-        scannerInactivityReported = false;
-      }
     }
     
     // If we have new data and there's been a pause in reception, process it
     if (newDataAvailable && millis() - lastDataTime > BARCODE_TIMEOUT) {
       processBarcode();
-    }
-    
-    // Check for scanner inactivity
-    if (!scannerInactivityReported && millis() - lastScannerActivity > SCANNER_INACTIVITY_THRESHOLD) {
-      recordError("Scanner inactivity detected - no data received for 5+ minutes");
-      scannerInactivityReported = true;
     }
     
     // Small delay to prevent watchdog issues and allow other tasks to run
@@ -702,13 +600,6 @@ void networkTask(void *pvParameters) {
           Serial.println("Performing hardware reset of Ethernet controller");
           xSemaphoreGive(serialMutex);
         }
-        
-        // Record this event
-        char errorMsg[100];
-        unsigned long inactivitySecs = (currentTime - lastNetworkActivity) / 1000;
-        snprintf(errorMsg, sizeof(errorMsg), "Network watchdog triggered - no activity for %lu seconds", inactivitySecs);
-        recordError(errorMsg);
-        
         resetEthernet();
         lastNetworkActivity = currentTime; // Reset timer to prevent immediate retry
       }
@@ -720,13 +611,6 @@ void networkTask(void *pvParameters) {
                        consecutiveFailedHeartbeats);
           xSemaphoreGive(serialMutex);
         }
-        
-        // Record this event
-        char errorMsg[100];
-        snprintf(errorMsg, sizeof(errorMsg), "Multiple consecutive heartbeat failures (%lu) triggered reset", 
-                 consecutiveFailedHeartbeats);
-        recordError(errorMsg);
-        
         resetEthernet();
         consecutiveFailedHeartbeats = 0; // Reset counter
       }
@@ -802,19 +686,14 @@ void setup() {
   // Create mutexes before any multitasking
   serialMutex = xSemaphoreCreateMutex();
   bufferMutex = xSemaphoreCreateMutex();
-  errorMutex = xSemaphoreCreateMutex();
   barcodeData.mutex = xSemaphoreCreateMutex();
   
-  if (serialMutex == NULL || bufferMutex == NULL || 
-      errorMutex == NULL || barcodeData.mutex == NULL) {
+  if (serialMutex == NULL || bufferMutex == NULL || barcodeData.mutex == NULL) {
     Serial.println("Error creating mutexes");
     while(1); // Fatal error
   }
   
   Serial.println("\n\nGM812 Scanner - Multi-Core Implementation with Ethernet");
-  
-  // Record startup event for first heartbeat
-  recordError("System started - firmware version 1.1 with error reporting");
   
   // Initialize scanner UART
   init_scanner();
