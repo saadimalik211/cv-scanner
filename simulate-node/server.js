@@ -21,6 +21,24 @@ app.use(morgan('combined')); // Log all requests
 // Store registered readers and their data
 const readers = {};
 
+// Track last API call
+let lastApiCall = {
+  endpoint: null,
+  method: null,
+  params: null,
+  timestamp: null
+};
+
+// Helper function to record API calls
+function recordApiCall(endpoint, method, params) {
+  lastApiCall = {
+    endpoint,
+    method,
+    params,
+    timestamp: new Date().toISOString()
+  };
+}
+
 // QR Reader Registration/Heartbeat endpoint
 app.put('/api/node/qrCodeReaderHeartbeat', (req, res) => {
   const nodeUUID = req.query.nodeUUID || 'unknown';
@@ -28,6 +46,13 @@ app.put('/api/node/qrCodeReaderHeartbeat', (req, res) => {
   const errorMessages = req.query.errorMessages;
   
   const timestamp = new Date().toISOString();
+  
+  // Record this API call
+  recordApiCall('/api/node/qrCodeReaderHeartbeat', 'PUT', {
+    nodeUUID,
+    qrReaderUUID,
+    errorMessages
+  });
   
   // Store/update reader information
   readers[`${nodeUUID}-${qrReaderUUID}`] = {
@@ -66,6 +91,13 @@ app.put('/api/node/recordQRCode', (req, res) => {
     return res.status(400).json({ status: 'error', message: 'No QR code data provided' });
   }
   
+  // Record this API call
+  recordApiCall('/api/node/recordQRCode', 'PUT', {
+    nodeUUID,
+    qrReaderUUID,
+    data
+  });
+  
   console.log(`QR Code received from node ${nodeUUID}, reader ${qrReaderUUID}: ${data}`);
   
   // Log to file
@@ -98,14 +130,42 @@ app.get('/', (req, res) => {
   });
   
   res.send(`
-    <h1>Virtual Node Service</h1>
-    <h2>Registered QR Code Readers</h2>
-    <pre>${JSON.stringify(readerInfo, null, 2)}</pre>
-    <h2>API Endpoints</h2>
-    <ul>
-      <li>PUT /api/node/qrCodeReaderHeartbeat?nodeUUID={nodeId}&qrReaderUUID={scannerId}</li>
-      <li>PUT /api/node/recordQRCode?nodeUUID={nodeId}&qrReaderUUID={scannerId}&data={qrData}</li>
-    </ul>
+    <html>
+    <head>
+      <title>Virtual Node Service</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        pre { background: #f5f5f5; padding: 10px; border-radius: 5px; }
+        .api-call { margin-bottom: 20px; }
+        .no-call { color: #666; font-style: italic; }
+        h2 { margin-top: 30px; border-bottom: 1px solid #ddd; padding-bottom: 10px; }
+      </style>
+      <meta http-equiv="refresh" content="10">
+    </head>
+    <body>
+      <h1>Virtual Node Service</h1>
+      
+      <h2>Last API Call</h2>
+      <div class="api-call">
+        ${lastApiCall.endpoint 
+          ? `<p><strong>Endpoint:</strong> ${lastApiCall.endpoint} (${lastApiCall.method})</p>
+             <p><strong>Time:</strong> ${lastApiCall.timestamp}</p>
+             <p><strong>Parameters:</strong></p>
+             <pre>${JSON.stringify(lastApiCall.params, null, 2)}</pre>`
+          : '<p class="no-call">No API calls received yet</p>'
+        }
+      </div>
+      
+      <h2>Registered QR Code Readers</h2>
+      <pre>${JSON.stringify(readerInfo, null, 2)}</pre>
+      
+      <h2>API Endpoints</h2>
+      <ul>
+        <li>PUT /api/node/qrCodeReaderHeartbeat?nodeUUID={nodeId}&qrReaderUUID={scannerId}</li>
+        <li>PUT /api/node/recordQRCode?nodeUUID={nodeId}&qrReaderUUID={scannerId}&data={qrData}</li>
+      </ul>
+    </body>
+    </html>
   `);
 });
 
